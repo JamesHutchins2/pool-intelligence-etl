@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+
+# Environment & Secrets
+*.env
+.env*
+*.key
+*.pem
+*.p12
+
+# Data & Logs
+test_data/
+logs/
+data/
+tmp/
+*.parquet
+*.xlsx
+*.csv.bak
+
+# Database & Cache
+*.db
+*.sqlite
+*.cache
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Airflow specific
+airflow.cfg
+webserver_config.py
+*.pid
+*.err
+*.out
+
+# Backup files
+*.bak
+*.backup
+*~
