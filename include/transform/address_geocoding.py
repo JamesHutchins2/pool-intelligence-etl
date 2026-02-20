@@ -2,79 +2,84 @@
 Address Geocoding Module
 
 Handles reverse geocoding of pool coordinates to structured addresses
-using Google Maps Geocoding API.
+using Geocodio API.
 """
 
 import os
 import time
 import logging
+import requests
 from typing import Dict, Any, List, Optional
 import pandas as pd
-from geopy.geocoders import GoogleV3
-from geopy.exc import GeocoderTimedOut, GeocoderQuotaExceeded
 
 logger = logging.getLogger(__name__)
 
 
-def get_google_maps_api_key() -> str:
-    """Get Google Maps API key from environment."""
-    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+def get_geocodio_api_key() -> str:
+    """Get Geocodio API key from environment."""
+    api_key = os.getenv("GEOCODIO_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_MAPS_API_KEY environment variable not set")
+        raise ValueError("GEOCODIO_API_KEY environment variable not set")
     return api_key
 
 
-def geocode_pool_location(lat: float, lon: float, geolocator: GoogleV3) -> Optional[Dict[str, Any]]:
+def geocode_pool_location(lat: float, lon: float, api_key: str) -> Optional[Dict[str, Any]]:
     """
-    Reverse geocode a single pool location.
+    Reverse geocode a single pool location using Geocodio.
     
     Args:
         lat: Latitude
         lon: Longitude
-        geolocator: geopy GoogleV3 geolocator instance
+        api_key: Geocodio API key
     
     Returns:
         Dict with address components or None if geocoding fails
     """
     try:
-        location = geolocator.reverse(f"{lat}, {lon}", timeout=10)
-        if not location:
+        url = "https://api.geocod.io/v1.7/reverse"
+        params = {
+            "q": f"{lat},{lon}",
+            "api_key": api_key
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data.get("results"):
             return None
         
-        # Extract address components
-        address_components = {}
-        for component in location.raw.get("address_components", []):
-            types = component.get("types", [])
-            name = component.get("long_name", "")
-            
-            if "street_number" in types:
-                address_components["street_number"] = name
-            elif "route" in types:
-                address_components["route"] = name
-            elif "locality" in types:
-                address_components["locality"] = name
-            elif "administrative_area_level_1" in types:
-                address_components["administrative_area_level_1"] = name
-            elif "country" in types:
-                address_components["country"] = name
-            elif "postal_code" in types:
-                address_components["postal_code"] = name
+        result = data["results"][0]
+        addr_comp = result.get("address_components", {})
+        
+        # Map Geocodio components to expected format (same structure as previous implementation)
+        address_components = {
+            "street_number": addr_comp.get("number"),
+            "route": addr_comp.get("formatted_street") or addr_comp.get("street"),
+            "locality": addr_comp.get("city"),
+            "administrative_area_level_1": addr_comp.get("state"),
+            "country": addr_comp.get("country"),
+            "postal_code": addr_comp.get("zip")
+        }
         
         return address_components
     
-    except GeocoderTimedOut:
+    except requests.exceptions.Timeout:
         logger.warning(f"Geocoding timeout for ({lat}, {lon})")
         return None
-    except GeocoderQuotaExceeded:
-        logger.error("Google Maps API quota exceeded")
-        raise
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:
+            logger.error("Geocodio API rate limit exceeded")
+            raise
+        logger.warning(f"Geocoding failed for ({lat}, {lon}): {e}")
+        return None
     except Exception as e:
         logger.warning(f"Geocoding failed for ({lat}, {lon}): {e}")
         return None
 
 
 def batch_geocode_pools(pools_df: pd.DataFrame, workdir: str, 
-                        batch_size: int = 100, delay: float = 0.05) -> Dict[str, Any]:
+                        batch_size: int = 100, delay: float = 0.06) -> Dict[str, Any]:  # 0.06s = 1000 req/min (Geocodio rate limit)
     """
     Geocode all pools with rate limiting and progress tracking.
     
@@ -82,7 +87,7 @@ def batch_geocode_pools(pools_df: pd.DataFrame, workdir: str,
         pools_df: DataFrame with 'lat' and 'lon' columns
         workdir: Working directory for output
         batch_size: Number of requests before longer pause
-        delay: Delay between requests in seconds
+        delay: Delay between requests in seconds (default 0.06s = 1000 req/min max)
     
     Returns:
         Dict with:
@@ -95,9 +100,8 @@ def batch_geocode_pools(pools_df: pd.DataFrame, workdir: str,
     logger.info("="*60)
     logger.info(f"Geocoding {len(pools_df)} pool locations")
     
-    # Initialize geolocator
-    api_key = get_google_maps_api_key()
-    geolocator = GoogleV3(api_key=api_key)
+    # Initialize Geocodio API key
+    api_key = get_geocodio_api_key()
     
     # Geocode each pool
     geocoded_results = []
@@ -108,7 +112,7 @@ def batch_geocode_pools(pools_df: pd.DataFrame, workdir: str,
             logger.info(f"Progress: {i}/{len(pools_df)} pools geocoded")
             time.sleep(1)  # Longer pause every batch
         
-        address_components = geocode_pool_location(row["lat"], row["lon"], geolocator)
+        address_components = geocode_pool_location(row["lat"], row["lon"], api_key)
         
         if address_components:
             geocoded_results.append({

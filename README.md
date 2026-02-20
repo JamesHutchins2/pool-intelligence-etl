@@ -53,7 +53,7 @@ This pipeline translates the processed data into client-facing databases and tri
 ```python
 # Key cleaning steps implemented:
 1. Filtering out non house listings    
-2. Address cleaning, standardization and correction using the Google API   
+2. Address cleaning, standardization and correction using Geocodio API   
 3. Heuristic determination of private versus community pool access from listing descriptions
 4. Continued detection of removed, added, and re-listed homes
 5. Database uploads adding newly created data to the central source of truth
@@ -66,8 +66,8 @@ This pipeline translates the processed data into client-facing databases and tri
 - **Accuracy Validation**: Cross-references multiple data sources for verification
 
 **Address Validation**  
-- **Google Maps API Integration**: Validates and corrects property addresses
-- **Geocoding**: Converts addresses to precise lat/lon coordinates
+- **Geocodio API Integration**: Validates and corrects property addresses
+- **Geocoding**: Converts addresses to precise lat/lon coordinates (forward and reverse)
 - **Standardization**: Ensures consistent address formatting across the database
 
 ### Pipeline 2: Client Data Update ETL
@@ -97,7 +97,7 @@ Properties (1007) → Pools (1007) → Listings (1007) → Client Updates
 | **Orchestration** | Apache Airflow | Pipeline scheduling and monitoring |
 | **Data Processing** | Pandas, PostgreSQL | Large-scale data transformation |
 | **Web Scraping** | Custom pyRealtor Library | Multi-source real estate data extraction |
-| **Geospatial** | PostGIS, Google Maps API | Location intelligence and validation |
+| **Geospatial** | PostGIS, Geocodio API | Location intelligence and validation |
 | **AI/ML** | YOLO, SAM (Segment Anything) | Computer vision for satellite imagery |
 | **Infrastructure** | Docker, Linux | Production deployment environment |
 

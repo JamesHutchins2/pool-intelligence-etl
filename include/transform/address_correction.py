@@ -10,9 +10,52 @@ from include.transform.address_cleaning import validate_parsed_addresses
 logger = logging.getLogger(__name__)
 
 
+def categorize_address_issues(
+    df: pd.DataFrame,
+    issue_inds: list[int]
+) -> tuple[list[int], list[int]]:
+    """
+    Split address issues into critical (need Geocodio API) vs minor (skip API).
+    
+    Critical: Missing coordinates AND parsing issues -> needs geocoding
+    Minor: Has valid coordinates but parsing issues -> keep original coords
+    
+    Returns:
+        (critical_inds, minor_inds)
+    """
+    critical = []
+    minor = []
+    
+    has_lat = "Latitude" in df.columns
+    has_lon = "Longitude" in df.columns
+    
+    for idx in issue_inds:
+        # Check if listing already has valid coordinates from MLS
+        lat = df.at[idx, "Latitude"] if has_lat else None
+        lon = df.at[idx, "Longitude"] if has_lon else None
+        
+        has_coords = (
+            lat is not None 
+            and lon is not None 
+            and pd.notna(lat) 
+            and pd.notna(lon)
+            and lat != 0.0 
+            and lon != 0.0
+        )
+        
+        if has_coords:
+            # Has coordinates - parsing issues are minor, keep original coords
+            minor.append(idx)
+        else:
+            # Missing coordinates - needs geocoding to get location
+            critical.append(idx)
+    
+    return critical, minor
+
+
 
 def parse_address_components(components):
-    """Extract structured address data from Google API components."""
+    """Extract structured address data from Geocodio API components."""
     parsed = {
         "address_number": None,
         "street_name": None,
@@ -22,21 +65,23 @@ def parse_address_components(components):
         "postal_code": None,
     }
 
-    for component in components or []:
-        types = component.get("types", [])
+    # Geocodio returns a dict, not a list
+    if not components:
+        return parsed
 
-        if "street_number" in types:
-            parsed["address_number"] = component.get("long_name")
-        elif "route" in types:
-            parsed["street_name"] = component.get("long_name")
-        elif "locality" in types or "administrative_area_level_2" in types:
-            parsed["city"] = component.get("long_name")
-        elif "administrative_area_level_1" in types:
-            parsed["province_state"] = component.get("short_name")
-        elif "country" in types:
-            parsed["country"] = component.get("long_name")
-        elif "postal_code" in types:
-            parsed["postal_code"] = component.get("long_name")
+    # Map Geocodio fields to our structure
+    if components.get("number"):
+        parsed["address_number"] = components.get("number")
+    if components.get("formatted_street") or components.get("street"):
+        parsed["street_name"] = components.get("formatted_street") or components.get("street")
+    if components.get("city"):
+        parsed["city"] = components.get("city")
+    if components.get("state"):
+        parsed["province_state"] = components.get("state")
+    if components.get("country"):
+        parsed["country"] = components.get("country")
+    if components.get("zip"):
+        parsed["postal_code"] = components.get("zip")
 
     return parsed
 
@@ -108,42 +153,48 @@ def geocode_correct_address(
     timeout_s: int = 20,
 ) -> dict:
     """
-    Call Google Geocode API and return:
+    Call Geocodio Geocode API and return:
       { formatted_address, lat, lon, components }
     where components include address_number, street_name, city, province_state, postal_code, country.
     """
-    query = street_address or ""
+    # Build structured parameters for Geocodio
+    params = {"api_key": api_key}
+    
+    # Construct street parameter
+    street_parts = []
     if address_number:
-        query = f"{address_number} {query}".strip()
+        street_parts.append(str(address_number))
+    if street_address:
+        street_parts.append(str(street_address))
+    if street_parts:
+        params["street"] = " ".join(street_parts)
+    
     if city:
-        query = f"{query}, {city}"
+        params["city"] = str(city)
     if postal_code:
-        query = f"{query}, {postal_code}"
+        params["postal_code"] = str(postal_code)
     if province_state:
-        query = f"{query}, {province_state}"
+        params["state"] = str(province_state)
     if country:
-        query = f"{query}, {country}"
+        params["country"] = str(country)
 
-    url = (
-        "https://maps.googleapis.com/maps/api/geocode/json"
-        f"?address={requests.utils.quote(query)}"
-        f"&key={api_key}"
-    )
+    url = "https://api.geocod.io/v1.7/geocode"
 
-    resp = requests.get(url, timeout=timeout_s)
+    resp = requests.get(url, params=params, timeout=timeout_s)
     resp.raise_for_status()
     payload = resp.json()
 
     if not payload.get("results"):
-        raise ValueError(f"No geocoding results for: {query}")
+        query_str = ", ".join([f"{k}={v}" for k, v in params.items() if k != "api_key"])
+        raise ValueError(f"No geocoding results for: {query_str}")
 
     top = payload["results"][0]
     formatted_address = top.get("formatted_address")
-    loc = (top.get("geometry") or {}).get("location") or {}
+    loc = top.get("location") or {}
     lat = loc.get("lat")
     lon = loc.get("lng")
 
-    parsed = parse_address_components(top.get("address_components") or [])
+    parsed = parse_address_components(top.get("address_components") or {})
     corrected = correct_address_components(formatted_address, parsed)
 
     return {
@@ -159,10 +210,10 @@ def correct_addresses(
     issue_inds: list[int],
     api_key: str,
     max_fix: int = 250,
-    sleep_s: float = 0.05,
+    sleep_s: float = 0.06,  # 0.06s = 1000 req/min (Geocodio rate limit)
 ) -> tuple[pd.DataFrame, list[int]]:
     """
-    Applies Google correction ONLY to the provided issue_inds (bad rows from prior validation).
+    Applies Geocodio correction ONLY to the provided issue_inds (bad rows from prior validation).
 
     Returns:
       (df_corrected, still_bad_inds_after_attempts)
@@ -173,7 +224,7 @@ def correct_addresses(
         return pd.DataFrame(), []
     
     if not api_key:
-        raise ValueError("api_key is required for Google correction")
+        raise ValueError("api_key is required for Geocodio correction")
 
     df_out = df.copy()
 

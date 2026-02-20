@@ -263,7 +263,7 @@ def weekly_listings_etl():
     @task
     def clean_and_correct_addresses(pool_result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Address parsing/validation + Google correction in ONE step to avoid index instability.
+        Address parsing/validation + Geocodio correction in ONE step to avoid index instability.
 
         Reads parquet -> clean_addresses() -> correct_addresses(bad rows only) -> write parquet.
 
@@ -302,40 +302,59 @@ def weekly_listings_etl():
         df_parsed, issue_inds = clean_addresses(df)
         initial_bad = len(issue_inds)
         logger.info(f"Total addresses: {before_rows}")
-        logger.info(f"Bad addresses found: {initial_bad} ({(initial_bad/before_rows*100) if before_rows > 0 else 0:.1f}%)")
+        logger.info(f"Addresses with parsing issues: {initial_bad} ({(initial_bad/before_rows*100) if before_rows > 0 else 0:.1f}%)")
         logger.info("::endgroup::")
 
-        # 2) Correct ONLY the bad rows (if API key is present)
-        import os
-        api_key = os.getenv("GOOGLE_GEOCODE_API_KEY")
+        # 2) Categorize issues: critical (needs API) vs minor (has coords, skip API)
+        from include.transform.address_correction import categorize_address_issues
+        
+        critical_inds, minor_inds = categorize_address_issues(df_parsed, issue_inds)
+        
+        logger.info("::group::Two-Tier Validation Results")
+        logger.info(f"Critical issues (missing coordinates): {len(critical_inds)}")
+        logger.info(f"Minor issues (has coordinates): {len(minor_inds)}")
+        logger.info(f"API calls saved: {len(minor_inds)} ({(len(minor_inds)/initial_bad*100) if initial_bad > 0 else 0:.1f}%)")
+        logger.info("::endgroup::")
 
-        still_bad = issue_inds
+        # 3) Correct ONLY critical addresses (missing coordinates)
+        import os
+        api_key = os.getenv("GEOCODIO_API_KEY")
+
+        still_bad = critical_inds
         df_fixed = df_parsed
 
-        if api_key and issue_inds:
-            logger.info("::group::Google Geocoding API Correction")
-            logger.info(f"Attempting to fix {len(issue_inds)} addresses (max 250)...")
+        if api_key and critical_inds:
+            logger.info("::group::Geocodio API Correction")
+            logger.info(f"Geocoding {len(critical_inds)} addresses without coordinates (max 250)...")
             df_fixed, still_bad = correct_addresses(
                 df=df_parsed,
-                issue_inds=issue_inds,
+                issue_inds=critical_inds,  # Only geocode critical issues
                 api_key=api_key,
                 max_fix=250,
-                sleep_s=0.05,
+                sleep_s=0.06,  # 0.06s = 1000 req/min (Geocodio rate limit)
             )
-            fixed_count = initial_bad - len(still_bad)
-            logger.info(f"Successfully corrected: {fixed_count}")
-            logger.info(f"Still bad after correction: {len(still_bad)}")
+            fixed_count = len(critical_inds) - len(still_bad)
+            logger.info(f"Successfully geocoded: {fixed_count}")
+            logger.info(f"Still missing coordinates: {len(still_bad)}")
             logger.info("::endgroup::")
         else:
             if not api_key:
-                logger.warning("⚠️  GOOGLE_GEOCODE_API_KEY not set - skipping address correction")
+                logger.warning("⚠️  GEOCODIO_API_KEY not set - skipping address correction")
+            elif not critical_inds:
+                logger.info("✅ All addresses have valid coordinates - no geocoding needed")
             
-        # Remove rows at indexes where address is still bad after parsing
+        # Remove ONLY rows still missing coordinates after geocoding attempts
+        # Rows with minor parsing issues but valid coordinates are kept
         if still_bad:
             still_bad = [i for i in still_bad if i in df_fixed.index]
             if still_bad:
-                logger.info(f"Dropping {len(still_bad)} rows with unfixable addresses")
+                logger.info(f"Dropping {len(still_bad)} rows without coordinates (could not geocode)")
                 df_fixed = df_fixed.drop(index=still_bad).reset_index(drop=True)
+        
+        # Log final statistics
+        rows_kept_with_minor_issues = len([i for i in minor_inds if i in df_fixed.index])
+        if rows_kept_with_minor_issues > 0:
+            logger.info(f"Kept {rows_kept_with_minor_issues} listings with minor address parsing issues (have valid coordinates)")
         
         logger.info("="*60)
         logger.info("ADDRESS CORRECTION RESULTS")

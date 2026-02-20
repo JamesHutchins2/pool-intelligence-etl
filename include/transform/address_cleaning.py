@@ -126,11 +126,11 @@ def validate_parsed_addresses(
     """
     Validate parsed address fields and return list of df indexes where validation fails.
 
-    Rules (minimal + reliable):
+    Rules (relaxed for coordinate preservation):
       - Required columns must exist
       - Required values must not be NaN/None/empty after strip
-      - address_number must be digits-only
-      - postal_code must match Canadian postal format (A1A1A1)
+      - address_number must start with digits (allows 123A, 123-B, etc.)
+      - postal_code must match Canadian postal format (accepts spacing/case variations)
       - street_address must contain at least one letter (avoid number-only)
     """
     missing_cols = [c for c in require if c not in df.columns]
@@ -148,13 +148,14 @@ def validate_parsed_addresses(
     for col in require:
         fail |= ~_is_nonempty_str(df[col])
 
-    # address_number digits-only
-    addr_ok = df["address_number"].fillna("").astype(str).str.fullmatch(r"\d+").fillna(False)
+    # address_number: allow alphanumeric (123, 123A, 123-B all valid)
+    addr = df["address_number"].fillna("").astype(str).str.strip()
+    addr_ok = addr.str.match(r"^\d+[A-Z]?$", na=False) | addr.str.match(r"^\d+-?[A-Z]?$", na=False)
     fail |= ~addr_ok
 
-    # postal_code strict match
-    pc = df["postal_code"].fillna("").astype(str).str.upper().str.replace(" ", "", regex=False).str.strip()
-    pc_ok = pc.str.fullmatch(CA_POSTAL_RE.pattern).fillna(False)
+    # postal_code: normalize then match (accept M5V3A8, M5V 3A8, m5v-3a8)
+    pc = df["postal_code"].fillna("").astype(str).str.upper().str.replace(r"[\s-]", "", regex=True).str.strip()
+    pc_ok = pc.str.match(r"^[A-Z]\d[A-Z]\d[A-Z]\d$", na=False)
     fail |= ~pc_ok
 
     # street_address should contain at least one letter
